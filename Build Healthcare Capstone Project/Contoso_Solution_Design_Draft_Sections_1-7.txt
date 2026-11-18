@@ -1,0 +1,104 @@
+CONTOSO COMMUNITY HEALTH
+Microsoft Cloud for Healthcare - Solution Design Document
+
+SECTION 1: Cloud Infrastructure and Security
+
+(Draft Milestone 1 submission, included for reference without revision.)
+
+Azure Services Selection
+Microsoft Dataverse, run as a Managed Environment, centralizes patient and referral records. Azure Health Data Services (FHIR service) ingests scheduling, clinical and billing data in one standard format, ending the silos. Azure Virtual Network with private endpoints keeps the FHIR service, Key Vault and storage off the internet, and network security groups admit only the integration subnet, so a compromised clinic workstation cannot query PHI stores. A VPN Gateway links the three clinics. Key Vault holds encryption keys, Blob Storage holds scanned referrals and audit archives, and Microsoft Sentinel centralizes security events.
+
+Security Controls
+Microsoft Defender for Cloud: Contoso enables Defender CSPM plus the Storage, Key Vault and Resource Manager plans. Defender for Storage malware-scans uploaded referral attachments, and the HITRUST/HIPAA standard tracks compliance.
+Azure Policy: The HITRUST/HIPAA initiative audits the environment. Deny-mode policies "Storage accounts should disable public network access" and "Allowed locations" (US only) block PHI stores that are publicly reachable or offshore.
+Monitoring: Entra ID sign-ins, Azure diagnostics, Defender alerts and Dataverse activity (through Purview Audit) feed Sentinel, whose rules flag bulk exports, impossible travel and cross-clinic record access. The IT Security Lead triages alerts each business day, a managed SOC partner covers after hours, and PHI incidents go to the Privacy Officer.
+
+In a breach, Sentinel and Defender detect it, a Sentinel playbook contains it by disabling the account and revoking sessions, and Purview Audit identifies affected patients for notification.
+
+MFA Requirements
+Conditional Access requires MFA for all PHI access; SMS is not allowed.
+
+Administrative staff (referral coordinators, front desk, billing, clinic administrators, leadership, internal auditors) use Microsoft Authenticator push with number matching.
+Clinical staff tap FIDO2 security keys on shared exam-room workstations and use Windows Hello for Business on assigned laptops.
+System administrators and security analysts use separate admin accounts with phishing-resistant FIDO2 (a Conditional Access authentication strength) and activate privileges through Privileged Identity Management (PIM).
+External specialists and auditors sign in as Entra B2B guests, using home-tenant MFA or Authenticator registered at first sign-in.
+
+New hires enroll on day one with a manager-issued Temporary Access Pass on the clinic network; IT issues FIDO2 keys in person after an ID check.
+
+Encryption Approach
+At rest, Dataverse protects demographics and referrals with Transparent Data Encryption, and the FHIR service encrypts clinical, scheduling and billing data, both with customer-managed keys in Key Vault. Azure Storage Service Encryption (AES-256) protects scanned forms, exports and audit archives, and Intune-enforced BitLocker protects clinic laptops.
+
+In transit, TLS 1.2+ protects intake-app and specialist-portal sessions, Dataverse-to-FHIR traffic and storage access. Private endpoints keep service traffic on Microsoft's backbone, and IPsec VPN tunnels protect clinic data feeds.
+
+Cost Awareness
+Every service bills by consumption; the largest drivers are Sentinel ingestion (per GB), Dataverse capacity, FHIR storage and API calls, per-resource Defender plans, and Entra ID P1 and governance licenses. Security-neutral savings come from routing verbose logs to the cheaper Basic tier, archiving after Sentinel's included 90 days, storing attachments in cheaper file capacity, enabling Defender plans only where resources exist, and setting per-clinic Azure Cost Management budgets.
+
+SECTION 2: Compliance and Access Controls
+
+(Draft Milestone 1 submission, included for reference without revision.)
+
+HIPAA Alignment
+Privacy Rule: Dataverse security roles scoped to each clinic's business unit, plus field-level security on clinical notes and Social Security numbers, limit PHI to need-to-know.
+Security Rule: Administrative safeguards include Security and Privacy Officers, an annual risk analysis, training before access, quarterly access reviews and a signed Microsoft Business Associate Agreement. Physical safeguards include Microsoft's audited datacenters and Intune-managed, auto-locking clinic devices. Technical safeguards include unique user IDs (no shared front-desk logins), MFA, session timeouts, auditing and encryption.
+Breach Notification Rule: Sentinel, Defender and Purview DLP alerts open an incident. The Privacy Officer completes the four-factor risk assessment, uses Purview Audit to identify affected patients, and notifies them within 60 days of discovery. HHS is notified in that window if 500 or more are affected (otherwise in the annual log), and media when over 500 residents of one state are affected.
+
+Privacy Controls
+Viewing a record: Coordinators see demographics, insurance and referral status for their clinic only. A field security profile limits clinical summaries to clinicians, and every view is logged.
+Exporting referral data: Only Clinic Administrators can export, and only their clinic's data. Exports carry a "Confidential - PHI" sensitivity label, and Endpoint DLP blocks USB and personal-cloud copies.
+Sharing with a specialist: A Power Pages portal replaces the shared inbox, showing each practice only its assigned referrals. Although treatment disclosures are exempt from minimum necessary, Contoso shares only the referral reason, relevant history and contacts.
+
+Access Model
+Referral Coordinator (CCH-RefCoord-<Clinic>) creates, reads and updates own-clinic referrals, without delete, export or clinical fields.
+Front Desk Scheduler (CCH-FrontDesk-<Clinic>) reads demographics and updates appointments.
+Billing Specialist (CCH-Billing) reads insurance and referral status and updates prior authorizations.
+Clinician (CCH-Clinicians-<Clinic>) creates referrals and reads own-clinic clinical summaries.
+Clinic Administrator (CCH-ClinicAdmin-<Clinic>) reads, reassigns, escalates and exports own-clinic referrals.
+Operations Leadership (CCH-Leadership) sees only aggregate dashboards, not patient records.
+Compliance Auditor (CCH-Auditors) reads audit logs and Sentinel incidents.
+Security Analyst (CCH-SecurityAnalysts) holds Microsoft Sentinel Responder only, with no Dataverse access.
+Platform Administrator (CCH-PlatformAdmins) is eligible for Dataverse System Administrator and Azure Contributor only through PIM, with approval and two-hour activation.
+External Specialist (CCH-ExternalSpecialists) sees only assigned referrals through the portal.
+
+Directory Configuration
+Each group maps to a Dataverse group team holding its security role and business unit; the leadership, auditor, security and specialist groups instead grant Power BI, Purview, Sentinel or portal access. The six staff groups use dynamic membership on HR job code and clinic, so access follows job changes. Auditor and specialist groups use expiring, approval-based Entitlement Management access packages, and Clinic Administrators sponsor specialists for 90 days. Admin and security groups are role-assignable under PIM. Entra inbound provisioning creates accounts from Contoso's HR system; Lifecycle Workflows then issue the Temporary Access Pass, assign HIPAA training before day one and disable accounts at termination. The MFA policies in Section 1 target these same groups.
+
+SECTION 3: Healthcare Data Model
+
+Data domains: Patient data shows who is referred and who pays. Referral data (specialty, urgency, status) is the workflow record, scheduling data closes referrals, and operational timestamps feed the dashboard.
+
+Patient domain mapping: MRN -> Contact.Medical Record Number; name and date of birth -> Contact.Full Name and Birth Date; preferred language -> Contact.Preferred Language; insurer and member ID -> Coverage.Payor and Subscriber ID; physician -> Contact.Primary Practitioner.
+
+Data quality: A referral cannot route without MRN, insurance, specialty, urgency and referring clinician. MRNs and ISO 8601 dates must match across systems, and coverage must be verified within 24 hours.
+
+Lifecycle: Records carry the "Confidential - PHI" label, which drives DLP, and Purview retains them ten years after the last encounter (audit logs six years).
+
+SECTION 4: Integration and Interoperability
+
+Source systems and flows: The clinical records system (registrations, referral orders) and the scheduling system (appointments) send data in real time, because bookings close referrals. Billing sends coverage in a nightly batch. Data enters the FHIR service over the VPN and syncs to Dataverse in near real time through Dataverse healthcare APIs, and referral status flows back to clinical records.
+
+Standard: FHIR R4 is the standard because both platforms are FHIR-native, using Patient, Coverage, ServiceRequest (the referral), Appointment and Task (status). Legacy HL7 v2 ADT A04/A08 and SIU S12 messages are converted to FHIR on arrival.
+
+Validation: FHIR $validate rejects resources with missing required fields or malformed MRNs, and a nightly count reconciliation against each source alerts the Platform Administrator to any mismatch.
+
+SECTION 5: Automation and Power Platform
+
+Tools: Power Apps replaces paper intake forms, Power Automate replaces the shared inbox, and Power BI replaces tracking spreadsheets.
+
+Workflow: A Clinician or Referral Coordinator creating a Dataverse referral row triggers the flow, which routes by specialty, clinic, urgency and payer rules. It assigns the clinic's coordinator queue, creates a Billing authorization task, publishes the referral to the specialist portal, and escalates unconfirmed referrals to the Clinic Administrator after 24 hours (urgent) or three business days (routine). Incomplete referrals return to the submitter, unknown specialties go to manual triage, and failed steps retry three times before alerting the Platform Administrator.
+
+Architecture: Power Apps writes to Dataverse under each user's Section 2 role, Power Automate runs on its triggers as a least-privilege application user, and Power BI reads it with row-level security.
+
+SECTION 6: Dashboard and Reporting
+
+Metrics: Days to specialist confirmation (weekly line chart, flagged above five days) tracks continuity of care. Referrals pending today (card, red above 40) shows daily load. Overdue referrals by clinic (bar chart, highlighting urgent referrals older than 24 hours) exposes bottlenecks, and incomplete-referral rate (KPI visual, flagged above 10%) signals intake problems.
+
+Stakeholders: Clinic Administrators use the overdue chart to reassign work between coordinators. Operations Leadership uses the trend line to decide coordinator staffing.
+
+SECTION 7: AI Integration and Responsible AI
+
+Use cases: In the intake app, Copilot summarizes referral history before coordinator review and drafts specialist follow-ups; in Power BI, it lists overdue referrals.
+
+Accuracy: A wrong summary could misroute a patient, so coordinators verify every summary and the flow routes only on structured fields.
+Privacy: Copilot inherits Section 2 roles and field-level security, so it cannot expose clinical notes and cause a reportable breach.
+Bias: Sparse or non-English records could yield weaker summaries and slower care, so Compliance Auditors sample summaries quarterly by preferred language.
+Transparency and oversight: Drafts are labeled "AI-generated, review required," and staff must edit and send each one, so nothing reaches a patient, payer or routing decision automatically.

@@ -1,0 +1,691 @@
+CONTOSO REGIONAL MEDICAL CENTER
+INTEGRATED SPECIALIST REFERRAL WORKFLOW: AUTOMATION DESIGN DOCUMENT
+
+Prepared for: IT Steering Committee
+Prepared by: Healthcare Technology Associate, Care Coordination Department
+Date: November 18, 2026
+Status: Proposed design, version 1.0
+Note: All scenario details are synthetic and created for this activity.
+
+
+EXECUTIVE SUMMARY
+=================
+
+Care Coordination handles more than 300 specialist referrals a week, and today every one of them is processed by hand. A coordinator transcribes the faxed or emailed referral into Epic, judges its urgency from the clinical notes, routes it to a specialist queue, and updates the referring provider by phone or fax. That process takes 3.2 days on average. 15% of referrals go to the wrong specialist queue on the first try. Coordinators judge urgency by different criteria, managers cannot see the queue in real time, and referring providers hear back inconsistently.
+
+This design replaces that process with an event-driven workflow on Microsoft Power Platform. It connects Epic (EMR), the scheduling platform and the provider communication portal using HL7 FHIR R4 and HL7 v2.5.1. The targets are:
+- Processing time of 1 business day or less for routine referrals and 4 business hours or less for urgent ones.
+- First-pass misrouting of 3% or less.
+- A live operational dashboard.
+- One clinically approved triage rubric used by everyone.
+- A referring-provider update within 1 hour of every status change.
+
+AI assistance (AI Builder and Copilot) only helps staff. Every AI output is reviewed by a named person, and AI makes no clinical, triage or routing decisions.
+
+
+WORKFLOW BOUNDARY MAP
+=====================
+
+Trigger: A new referral arrives through one of three channels:
+- an inbound fax
+- an email to the referrals shared mailbox
+- an electronic referral submitted through the provider portal or ordered in Epic
+
+Stages (the systems, roles and data involved in each):
+1. Intake. Systems: fax server, Exchange Online, SharePoint, the portal and Epic. Role: automated. Data: the referral document or a FHIR ServiceRequest.
+2. Extraction and verification. Systems: AI Builder, Power Apps and Dataverse. Role: referral coordinator. Data: patient demographics, the referring provider and NPI, the requested specialty, the reason or diagnosis, the stated priority, insurance and attached notes.
+3. Patient match and EMR record. System: Epic. Role: automated; registration staff handle exceptions. Data: Patient and ServiceRequest.
+4. Urgency triage. Systems: Power Apps, the Dataverse rubric and Epic notes. Roles: coordinator (triage checklist) and clinical reviewer (urgent or uncertain referrals). Data: checklist answers and clinical notes.
+5. Routing. Systems: the Dataverse routing table, Epic and the scheduling platform. Role: automated; the coordinator handles exceptions. Data: the specialist queue, site and capacity.
+6. Scheduling handoff. System: the scheduling platform. Role: scheduling staff. Data: the appointment request and the booked appointment.
+7. Provider notification. Systems: the portal, with secure fax as the fallback. Role: referring provider (recipient). Data: status changes and messages.
+
+End states:
+- (A) Scheduled: the appointment is booked, Epic is updated, the referring provider is notified and the case is closed.
+- (B) Declined or redirected: the reason is documented and the provider is notified.
+- (C) Withdrawn: cancelled by the referring provider or the patient.
+- (D) Unable to schedule: closed after three documented attempts to contact the patient, with the provider notified.
+
+Scope: This workflow does not handle emergencies. Referring providers with STAT or emergent needs keep using direct phone escalation or the ED, as current policy requires.
+
+
+SECTION 1: AUTOMATION DESIGN
+============================
+
+1.1 Trigger
+
+The workflow has one logical trigger, "new referral received." Three channel-specific intake flows feed it. Each intake flow creates a Referral row in Dataverse with an ID of the form CRF-YYYY-NNNNN and a receipt timestamp, which starts the SLA clock. Adding that row starts the main Referral Orchestrator flow through the Dataverse "When a row is added" trigger, so every referral follows the same path however it arrived.
+- Fax: The fax server saves each inbound fax as a PDF to a secured SharePoint library, which fires the SharePoint "When a file is created" trigger.
+- Email: A message arrives in the referrals shared mailbox, which fires the Outlook "When a new email arrives in a shared mailbox" trigger. Attachments are saved to the same library.
+- Electronic: An e-referral is submitted in the portal, or a referral order is signed in Epic. A FHIR ServiceRequest event reaches Power Automate through the integration layer's Azure Service Bus queue. Because the data is already structured, these referrals skip AI extraction.
+
+1.2 Conditions evaluated and the paths they create
+
+C1. Channel
+- Structured (FHIR): the referral goes straight to FHIR validation, then C3.
+- Unstructured (fax or email): AI Builder extraction runs first.
+
+C2. Extraction completeness
+- Every fax and email referral goes to coordinator verification.
+- Fields with confidence below 0.85 are highlighted for the coordinator.
+- If a required field is missing from the source document, the referral goes to Exception E1.
+- Required fields are: patient name, DOB, a contact number, referring provider and NPI, requested specialty, reason or diagnosis, stated priority, insurance and attached clinical notes.
+
+C3. Patient match
+The workflow searches Epic for the patient by FHIR Patient search.
+- Exactly one confident match: the referral is linked to that patient.
+- No match, or more than one: Exception E2.
+
+C4. Duplicate check
+If the same patient already has an open referral for the same specialty within the last 30 days, the referral goes to Exception E6.
+
+C5. Urgency tier
+Urgency is set by a standardized rubric of specialty-specific red-flag criteria. The Medical Director approves the rubric and it is stored in Dataverse. The coordinator answers it as a Yes/No/Unsure checklist during verification.
+- URGENT: the referring provider marked the referral STAT or urgent, or any criterion is answered Yes. It goes to the Clinical Review Queue with a 4-business-hour SLA.
+- INDETERMINATE: any criterion is answered Unsure. It goes to the Clinical Review Queue with a 1-business-day SLA.
+- ROUTINE: the stated priority is routine and every criterion is answered No. It is routed automatically. A random 10% sample goes to clinical reviewers for weekly QA.
+- The clinical reviewer can confirm the tier, downgrade it (a reason is required), request more information (Exception E1), or recommend a different specialty, which becomes a documented routing input.
+- The rules can raise a tier but can never lower one. Only a clinical reviewer can lower a tier.
+
+C6. Routing match
+The workflow looks up the Dataverse Routing Rules table using four inputs: the coded specialty, the ICD-10 category, the patient's preferred site and payer network acceptance.
+- Exactly one queue matches: the referral is assigned automatically.
+- No queue, or more than one, matches: Exception E3.
+
+C7. Capacity
+The workflow checks availability in the scheduling platform.
+- Routine: if the matched site's next available appointment is more than 30 days out and the patient accepts any site, the workflow offers the alternate site among the three with the soonest availability.
+- Urgent: the earliest slot across all sites is offered.
+
+C8. Scheduling outcome
+- Appointment booked: end state A.
+- Patient unreachable after 3 attempts: end state D.
+- Specialist returns the referral: Exception E7.
+
+C9. Notification channel
+- Referring provider enrolled in the portal: the update goes through the portal.
+- Not enrolled: the update goes by secure fax.
+
+1.3 Actions at each stage
+
+- Stage 1, Intake: create the Referral row, link the source document, and start the SLA clock.
+- Stage 2, Extraction and verification:
+  - AI Builder extracts the fields and a confidence score for each.
+  - The coordinator confirms or corrects every field on a side-by-side document/data screen and completes the triage checklist.
+  - Each correction is logged for AI quality monitoring.
+- Stage 3, EMR record:
+  - Search Epic for the patient.
+  - Create the referral in Epic as a FHIR ServiceRequest, with the source document as a DocumentReference.
+  - Create a FHIR Task to track status.
+  - Store the Epic IDs in Dataverse.
+  - Send a "Received" notification to the referring provider.
+- Stage 4, Triage:
+  - Evaluate the rubric.
+  - Send urgent and indeterminate referrals to the reviewer queue.
+  - Post a Teams alert to the reviewer on duty. The alert carries only the referral ID and an app link, with no PHI.
+  - The reviewer opens the notes in Epic, records a decision, and the decision is written back to Epic.
+- Stage 5, Routing:
+  - Look up the routing rule and check capacity.
+  - Update ServiceRequest.performer in Epic and place the referral in the specialist's Epic work queue.
+  - Set the status to "Routed" and send a notification.
+- Stage 6, Scheduling:
+  - Send an HL7 SRM^S01 appointment request to the scheduling platform.
+  - Scheduling staff contact the patient.
+  - The SIU^S12 booking message updates Epic and Dataverse, and the status becomes "Scheduled."
+- Stage 7, Notification: every status change triggers the Status Notification flow.
+  - Statuses covered: Received, Under Clinical Review, Pending Information, Routed, Scheduled, Declined/Redirected and Closed.
+  - The flow uses approved templates through the portal, or secure fax as the fallback.
+  - The send time and delivery confirmation are logged.
+- Stage 8, Closure: set the end state, send the final notification, stop the SLA clock and close the Task.
+
+1.4 Exception handling
+
+E1. Incomplete referral, or more information needed
+- The status becomes "Pending Information" and the processing-time clock pauses; paused time is tracked separately.
+- A templated request listing the specific missing items goes to the referring provider.
+- An automatic reminder goes out after 2 business days, and the coordinator phones the provider after 5.
+- For urgent referrals, the coordinator phones the provider immediately.
+
+E2. Patient match failure (no match or more than one)
+- The workflow never creates or merges a patient record automatically.
+- The candidate matches go to the Patient Access/Registration work queue for identity resolution.
+- Once the identity is resolved, the referral resumes at Stage 3.
+
+E3. Routing ambiguity (no matching rule, or more than one)
+- The coordinator chooses from the candidate queues and records the reason.
+- Every manual route is reviewed monthly to update the Routing Rules table, which steadily removes sources of misrouting.
+
+E4. Urgent SLA at risk or breached
+The SLA Monitor flow runs every 15 minutes.
+- At 75% of the SLA (3 hours), it reminds the assigned reviewer.
+- At breach, it escalates to the lead clinical reviewer and the department manager through Teams, and the dashboard flags the referral red.
+
+E5. Integration failure
+Triggers: an Epic, scheduling-platform or portal API error, a timeout, or an HL7 AE/AR negative acknowledgment.
+- The call is retried with exponential backoff, up to 4 attempts over about 15 minutes.
+- After the final retry, the message goes to the Service Bus dead-letter queue and the referral status becomes "Integration Hold." IT on-call and the coordinator are alerted.
+- An urgent referral in hold for more than 30 minutes switches to the documented downtime procedure (phone plus manual Epic entry) and is reconciled once the system is restored.
+- The referral ID serves as an idempotency key, so retries never create duplicate records.
+
+E6. Possible duplicate
+The coordinator decides whether to merge the referral as additional documentation or keep it separate.
+
+E7. Specialist returns or declines the referral
+- The status becomes "Returned" and the referral is re-queued in E3 at high priority.
+- It counts against first-pass routing accuracy.
+- The referring provider is notified.
+
+
+SECTION 2: INTEGRATION SPECIFICATION
+====================================
+
+2.1 Source systems and the data each contributes
+
+- Epic EMR is the system of record for the patient and the referral order.
+  - It supplies: demographics and MRN (Patient), insurance (Coverage), referring and specialist providers (Practitioner, PractitionerRole), clinical notes and diagnoses (DocumentReference, Condition), and specialist referral work queues.
+  - It receives: the referral (ServiceRequest), routing assignments, appointments and status.
+- The scheduling platform supplies specialist availability by site and specialty, and appointment bookings, reschedules, cancellations and no-shows. It receives appointment requests.
+- The provider communication portal supplies e-referral submissions, referring-provider identity, enrollment status and contact preferences, and provider replies to information requests. It receives referral status and messages.
+- The intake channels are the fax server, which handles inbound referral faxes and secure outbound fax fallback, and the Exchange Online shared mailbox for emailed referrals. Both supply unstructured referral documents.
+- Microsoft Dataverse holds the workflow state:
+  - referral status and its history
+  - the routing rules and the triage rubric
+  - the SLA timestamps
+  - the exception, notification and AI-assist logs
+  It holds only the minimum PHI needed, and Epic remains the source of truth.
+- SharePoint Online holds the secured source documents. Copies are purged 30 days after the document is filed to Epic, under the records-retention policy.
+- The integration layer has three parts:
+  - Azure API Management: the single gateway for all REST and FHIR calls.
+  - Contoso's existing HL7 interface engine: HL7 v2 routing and v2-to-FHIR transformation.
+  - Azure Service Bus: durable queues, including the dead-letter queue.
+- Microsoft Entra ID provides identity and roles. Microsoft Teams receives alerts, which contain no PHI.
+
+2.2 Integration points and exchange patterns
+
+IP1. Fax server and mailbox to SharePoint and Dataverse
+- When: a referral document arrives.
+- Data: the PDF or the email with attachments.
+- Pattern: event-driven connector trigger.
+
+IP2. Portal or Epic to Dataverse
+- When: an e-referral is submitted or an Epic referral order is signed.
+- Data: a FHIR ServiceRequest Bundle.
+- Pattern: event-driven. The FHIR subscription notification goes to Service Bus, which triggers the flow.
+
+IP3. Power Automate to Epic (patient match, Stage 3)
+- Data: a Patient search and its response.
+- Pattern: real-time synchronous FHIR REST API.
+
+IP4. Power Automate to Epic (create the referral after verification, update it after triage and routing)
+- Data: ServiceRequest, DocumentReference and Task.
+- Pattern: a real-time FHIR API call. If FHIR write is not enabled for ServiceRequest, an HL7 REF^I12 message goes through the interface engine instead (event-driven, asynchronous, with ACK).
+
+IP5. Power Apps to Epic (clinical reviewer opens notes, Stage 4)
+- Data: clinical notes.
+- Pattern: real-time, on-demand read through an Epic context link. The notes are viewed in Epic and are not copied into Dataverse.
+
+IP6. Power Automate to the scheduling platform (capacity check, condition C7)
+- Data: open slots by site and specialty.
+- Pattern: real-time REST API through a custom connector.
+
+IP7. Power Automate to the scheduling platform (scheduling request after routing)
+- Data: an HL7 SRM^S01 message.
+- Pattern: event-driven and asynchronous through the interface engine, with ACK.
+
+IP8. Scheduling platform to Epic and Dataverse (appointment booked, rescheduled, cancelled or no-show)
+- Data: HL7 SIU^S12, S13, S15 and S26 messages.
+- Pattern: event-driven. The interface engine sends each message to Epic and to Service Bus.
+
+IP9. Power Automate to the portal, or secure fax (every status change)
+- Data: a FHIR Task update and a FHIR Communication.
+- Pattern: event-driven, triggered by a Dataverse status change.
+
+IP10. Epic and the scheduling platform to the Dataverse routing table
+- Data: the specialist directory (PractitionerRole, HealthcareService) and payer acceptance.
+- Pattern: a scheduled nightly batch. Proposed rule changes take effect only after the manager approves them.
+
+IP11. Dataverse to Power BI
+- Data: workflow and SLA data.
+- Pattern: DirectQuery for the near-real-time operations page, and a scheduled hourly import for the trend pages.
+
+IP12. Power Automate to Teams
+- Data: SLA and exception alerts, containing only the referral ID and a link.
+- Pattern: event-driven.
+
+2.3 Connection and authentication requirements
+
+- Epic FHIR:
+  - The integration is registered with Epic as a backend application.
+  - It authenticates with SMART Backend Services, which is OAuth 2.0 client credentials with a signed JWT assertion. The private key is held in Azure Key Vault.
+  - System scopes are limited to what the workflow needs (Patient.read, Coverage.read, DocumentReference.read/write, ServiceRequest.read/write, Task.read/write).
+  - Clinician reads use SMART on FHIR user context, so Epic audits access under the individual's own identity.
+  - All calls pass through API Management for rate limiting, logging and IP allowlisting, over a private network connection (VPN or ExpressRoute).
+- Interface engine:
+  - HL7 v2 travels over MLLP with TLS inside the hospital network.
+  - The engine connects outbound to Service Bus using Entra ID authentication, so no inbound firewall ports are opened to the cloud.
+- Scheduling platform API and portal: OAuth 2.0 client credentials, with secrets in Key Vault and rotated every 90 days. Referring providers sign in to the portal with MFA.
+- Power Platform:
+  - Flows run under a dedicated service principal (an application user), not under personal accounts.
+  - Endpoints are held in solution connection references and environment variables.
+  - Each role has a least-privilege Dataverse security role, and PHI columns have column-level security.
+  - Dataverse auditing is turned on.
+  - The environment is a Managed Environment, with a DLP policy that blocks consumer connectors and any connector that is not approved.
+  - Staff sign in with Entra Conditional Access and MFA.
+- Compliance:
+  - Every component runs in Contoso's Microsoft tenant, covered by the Business Associate Agreement (BAA).
+  - Data is encrypted in transit (TLS 1.2 or higher) and at rest, and stays in US data residency.
+  - Only the minimum necessary PHI is used.
+  - Integration accounts get quarterly access reviews.
+
+
+SECTION 3: INTEROPERABILITY APPROACH
+====================================
+
+3.1 Standards: both, with FHIR R4 as the primary standard
+
+- HL7 FHIR R4 with the US Core profiles is used for Epic and the portal, for four reasons:
+  - Epic exposes certified FHIR R4 APIs.
+  - FHIR's RESTful JSON works natively with Power Automate custom connectors.
+  - Individual FHIR resources support real-time queries such as patient matching.
+  - The FHIR Task resource gives every system a shared, standard way to track referral status.
+- HL7 v2.5.1 is used where it is already established. The scheduling platform uses v2 scheduling messages, the interface engine already runs v2 feeds reliably, and Epic's inbound REF interface is a proven fallback for writing referrals. Replacing working v2 interfaces would add cost and risk without benefit.
+- FHIR is the canonical model. The interface engine translates between v2 and FHIR following the HL7 v2-to-FHIR mapping guide, so Power Automate only ever handles FHIR JSON.
+
+3.2 Resource and message types
+
+FHIR resources:
+- ServiceRequest is the referral itself. Its key elements:
+  - identifier: the Contoso referral ID.
+  - status: draft, active, completed or revoked.
+  - intent: order.
+  - category: SNOMED CT 3457005, "Patient referral."
+  - code: the requested specialty service.
+  - priority: routine, urgent, asap or stat.
+  - subject: Patient.
+  - requester: the referring PractitionerRole, identified by NPI.
+  - performer: the assigned specialist's PractitionerRole or HealthcareService queue.
+  - reasonCode: an ICD-10-CM code.
+  - insurance: Coverage.
+  - supportingInfo: DocumentReference.
+- Task tracks the workflow. Task.focus points to the ServiceRequest. Task.status uses received, accepted, rejected, in-progress, on-hold, completed and cancelled. Task.businessStatus uses local codes such as clinical-review, routed, scheduled and pending-info. Task.owner and Task.executionPeriod hold ownership and SLA timing. The portal reads the Task to display status.
+- Supporting resources:
+  - Patient, Practitioner, PractitionerRole, Organization and HealthcareService (specialist queue by site)
+  - Coverage and Condition
+  - DocumentReference (attachments)
+  - Appointment
+  - Communication: messages to the referring provider, linked to the referral through basedOn.
+  - Provenance: records who or what created or changed each resource, including whether AI assisted.
+  - Bundle (type transaction): submits a referral package atomically.
+
+HL7 v2.5.1 messages:
+- REF^I12 (patient referral), with RRI^I12 as the response, REF^I13 to modify and REF^I14 to cancel. These are the fallback path into Epic.
+  - Key segments: MSH, PID, RF1, PRD, DG1, IN1 and NTE/OBX.
+  - RF1 fields used: RF1-1 status, RF1-2 priority, RF1-3 type, RF1-6 originating referral ID and RF1-10 reason.
+  - PRD carries both the referring and the referred-to providers.
+- SRM^S01 (request a new appointment) goes to the scheduling platform, with SRR^S01 as the response. Segments: MSH, ARQ, PID, RGS, AIS, AIL and AIP. ARQ-1 (placer appointment ID) carries the referral ID.
+- SIU^S12 (new booking), S13 (reschedule), S15 (cancellation) and S26 (no-show) come back from the scheduling platform. Segments: MSH, SCH, PID, RGS, AIS, AIL and AIP.
+- ACK uses AA (accepted), AE (error) and AR (rejected). AE and AR trigger Exception E5.
+
+3.3 Data format and validation
+
+- Formats:
+  - FHIR R4 JSON (application/fhir+json, UTF-8).
+  - HL7 v2.5.1 in standard pipe-delimited (ER7) encoding.
+  - PDF attachments, Base64-encoded in DocumentReference.content.attachment.
+- Structural validation:
+  - Before any write, FHIR resources are checked against the R4 base specification, the US Core profiles and a local "Contoso Referral" ServiceRequest profile. The local profile makes priority, reasonCode, requester, performer and supportingInfo required. The check uses the FHIR $validate operation or the HL7 FHIR Validator in the integration layer.
+  - The interface engine checks v2 messages against a conformance profile covering required segments, cardinality, data types and table values.
+- Terminology validation:
+  - ICD-10-CM and SNOMED CT codes, the priority value set, NUCC specialty taxonomy and Contoso site codes are checked.
+  - NPIs are checked with the standard Luhn check digit and against Contoso's provider master.
+- Business-rule validation (Power Automate and Dataverse business rules):
+  - The DOB is not in the future.
+  - The referral is dated within the last 90 days.
+  - The requested specialty exists in the Routing Rules table.
+  - Insurance is present.
+- Responses:
+  - FHIR HTTP status codes and OperationOutcome responses, and HL7 ACK codes, are parsed.
+  - Invalid inbound data goes to Exception E1 or E3, and transport failures to E5.
+- Correlation and idempotency:
+  - The referral ID is carried in ServiceRequest.identifier, Task.identifier, RF1-6, ARQ-1 and SCH-1, so every system refers to the same referral.
+  - FHIR conditional create (the If-None-Exist header) and HL7 MSH-10 message control IDs prevent duplicates on retry.
+- Testing: Interfaces are tested end to end in Epic and scheduling-platform non-production environments using synthetic patients before go-live.
+
+3.4 Exchange methods
+
+- FHIR REST API over HTTPS through Azure API Management, called from Power Automate custom connectors. Searches use GET, creates use conditional POST, and updates use PUT or PATCH. Epic and portal events arrive through FHIR Subscriptions (using the R4 Subscriptions Backport where supported) or vendor event feeds, delivered to Service Bus.
+- The HL7 interface engine exchanges v2 messages over MLLP/TLS with the scheduling platform and Epic, transforms between v2 and FHIR, and publishes to and consumes from Service Bus queues for Power Automate.
+- Future roadmap: Direct Secure Messaging with closed-loop referral exchange (IHE 360X) for external practices that are not on the portal, to replace the fax fallback.
+
+
+SECTION 4: POWER PLATFORM COMPONENT SELECTION
+=============================================
+
+4.1 Power Automate cloud flows: workflow orchestration
+
+Function:
+- Three intake flows (fax, email and e-referral) run Stage 1.
+- The Referral Orchestrator runs Stages 2 through 6. Its child flows are Patient Match, Triage Evaluation, Routing and Scheduling Request.
+- The Status Notification flow runs Stage 7.
+- The SLA Monitor (every 15 minutes) handles Exception E4.
+- The Retry and Dead-Letter Handler handles Exception E5.
+- The Nightly Routing Directory Sync handles IP10.
+
+Why Power Automate:
+- Most of the 3.2 days is spent waiting at manual handoffs. Event triggers move each referral forward the moment its data is ready.
+- It has built-in connectors for Outlook, SharePoint, Dataverse, Teams and Service Bus, and custom connectors handle Epic FHIR and the scheduling API.
+- Conditions C1 through C9 are visible, auditable Condition and Switch actions rather than opaque logic.
+- Scope try/catch blocks and retry policies implement the exception paths.
+- Run history provides an audit trail.
+- Providers get updated consistently because every status change automatically starts a notification, with no step that depends on someone remembering.
+
+4.2 AI Builder: document processing and prompts
+
+Function:
+- Stage 2: a custom document processing model, trained on Contoso's referral form layouts and common external formats, extracts the referral fields and gives a confidence score for each.
+- AI Builder prompts power the Copilot-style assistance described in Section 6 (use cases 1 to 3).
+
+Why AI Builder: Transcribing 300 or more referrals a week is the largest manual task in the process. Per-field confidence scores support condition C2 and focus the coordinator's verification. AI Builder runs natively in Power Automate inside the BAA-covered tenant, and the model can be retrained as forms change.
+
+4.3 Microsoft Dataverse: workflow data and rules
+
+Function: Dataverse holds these tables:
+- Referral and Status History
+- Routing Rules and Triage Rubric Criteria
+- Checklist Responses
+- Exceptions, Notification Log and AI Assist Log
+
+Why Dataverse:
+- Misrouting at 15% comes from specialty matching that depends on individual memory. A governed, versioned Routing Rules table replaces that memory.
+- Inconsistent triage needs one stored rubric that everyone uses.
+- Role-based and column-level security, plus auditing, protect PHI.
+- Timestamps on every status change feed the SLA monitoring and the dashboard.
+- Dataverse works natively with Power Apps, Power Automate and Power BI.
+
+4.4 Power Apps (model-driven): the "Referral Command Center"
+
+Function: one app with a role-based workspace for each user group:
+- Coordinators: a side-by-side verification screen, the triage checklist, and the E1, E2, E3, E6 and E7 exception queues.
+- Clinical reviewers: an urgent queue sorted by SLA time remaining, an Epic notes link, the AI summary panel and the decision form.
+- Scheduling staff: routed referrals waiting to be scheduled, sorted by priority.
+- Manager: maintenance of the routing rules and the rubric, with approval.
+
+A Business Process Flow shows the stages Intake, Verify, Triage, Route, Schedule and Close.
+
+Why a model-driven app: Queue work is data-dense, and a model-driven app gives role-based forms, views and security on Dataverse with little custom code. The Business Process Flow gates enforce the standard sequence. For example, a referral cannot be routed until triage is complete, and AI-filled fields cannot advance until a coordinator confirms them.
+
+4.5 Power BI: the Referral Operations Dashboard (Section 5)
+
+Function:
+- It shows the queue in near real time (DirectQuery) and performance trends (hourly import).
+- Row-level security limits each user to their sites.
+- Data alerts notify the manager when thresholds are crossed.
+- Copilot in Power BI generates narrative summaries (use case 4).
+
+Why Power BI: It directly fixes the lack of real-time visibility, it has a native Dataverse connector, and it can be shared securely in Teams.
+
+4.6 How the components work together
+
+1. A fax arrives, and an intake flow saves it and creates a Dataverse Referral.
+2. AI Builder extracts the fields.
+3. The coordinator verifies them and completes the triage checklist in Power Apps.
+4. The Orchestrator flow matches the patient in Epic over FHIR, creates the ServiceRequest and Task, and evaluates the rubric.
+5. Urgent and indeterminate referrals appear in the reviewer workspace with an AI summary, and the reviewer decides.
+6. The Routing flow applies the Dataverse rules and checks capacity.
+7. An SRM^S01 message goes to the scheduling platform, and the SIU^S12 reply updates Epic and Dataverse.
+8. Each status change starts the Notification flow to the portal or fax.
+9. Power BI reads Dataverse throughout, and Teams carries the alerts.
+
+Deployment and governance:
+- All components ship as one Power Platform solution through dev, test and production environments using Power Platform pipelines.
+- Managed Environment governance and DLP policies apply.
+- Power Pages is not used, because the portal already exists. Power Automate Desktop (RPA) is held in reserve only as a contingency if a system's API becomes unavailable.
+
+
+SECTION 5: DASHBOARD METRICS
+============================
+
+5.1 Audience
+
+The primary audience is the Care Coordination department manager and the team leads, who manage daily throughput and must act within the same day. This shapes the dashboard in five ways:
+- The first page answers "what needs attention now?" Exceptions and at-risk referrals appear first, with drill-through to a list of referral IDs. Patient names appear only for authorized roles, through row-level security.
+- Visuals are simple: KPI cards, bar charts and line charts that can be read at a glance on a wall monitor.
+- Every red/amber/green status also has an icon and a text label, so it does not depend on color alone (accessibility).
+- Secondary audiences each have their own view:
+  - Coordinators and reviewers: their own queues.
+  - The IT steering committee: a monthly trend page that compares against the baseline.
+  - The integration team: an integration-health view.
+- Coordinator-level metrics are visible only to the manager and are used for coaching.
+
+5.2 Metrics
+
+M1. Referral processing time
+- Pain point addressed: 3.2-day average processing time.
+- Definition: business hours from receipt to "Routed" with the provider notified. Pending Information time is excluded and tracked separately.
+- Visualization: a KPI card showing the current week's median against the 3.2-day baseline, plus a weekly line chart of the median and 90th percentile with a target line. A line chart shows whether performance is improving and holding.
+- Normal: routine median of 1 business day or less, with the 90th percentile at 2 days or less; urgent median of 4 business hours or less.
+- Exception: routine median above 1 day is amber and above 2 days is red. Any urgent referral over 4 hours is an exception.
+
+M2. First-pass routing accuracy
+- Pain point addressed: 15% misrouting.
+- Definition: the percentage of routed referrals that are not re-routed or returned within 14 days.
+- Visualization: a KPI card, plus a bar chart by specialty sorted by worst performer. Bars make it easy to compare categories and show which routing rules need fixing.
+- Normal: 97% or higher, meaning a misroute rate of 3% or less.
+- Exception: below 95% overall, or any specialty below 90%. Either triggers a routing-rule review.
+
+M3. Live queue volume and aging
+- Pain point addressed: no real-time visibility.
+- Definition: open referrals by workflow stage (Verification, Clinical Review, Routing Exception, Pending Information, Awaiting Scheduling, Integration Hold) and by site, with age buckets.
+- Visualization: a stacked horizontal bar chart of stage by site, plus an aging matrix with conditional formatting, refreshed in near real time. Together they show where work is piling up and at which site.
+- Normal: open pre-routing referrals at or below one day's intake (about 60), and nothing older than 1 business day in a pre-routing stage.
+- Exception: the pre-routing backlog exceeds 125% of the trailing 4-week daily average, or any referral in a pre-routing stage is older than 2 business days.
+
+M4. Urgent triage SLA compliance
+- Pain point addressed: no standardized urgency triage.
+- Definition: the percentage of urgent referrals that receive clinical review within 4 business hours.
+- Visualization: a KPI card, plus an "at-risk" table sorted by SLA time remaining. The table tells the lead exactly which referral to act on next.
+- Normal: 95% or higher.
+- Exception: weekly compliance below 90%, or any breach, which also sends an immediate alert.
+
+M5. Triage consistency
+- Pain point addressed: coordinators applying different triage criteria.
+- Definition: the urgency mix by site, the clinical reviewer override rate by specialty, and the disagreement rate in the routine QA sample.
+- Visualization: a 100% stacked bar chart of urgency tier by site, plus a bar chart of override rate. The 100% bars show a site applying different criteria as an outlier, even when sites have different volumes.
+- Normal: each site's urgent percentage is within 5 points of the network average, the override rate is 10% or less, and QA disagreement is 5% or less.
+- Exception: any of these limits is exceeded, which triggers a rubric and training review led by the Medical Director.
+
+M6. Provider notification timeliness
+- Pain point addressed: inconsistent status updates.
+- Definition: the percentage of status changes where the referring provider is notified within 1 hour, plus the delivery success rate.
+- Visualization: a KPI card, a weekly line chart, and a bar chart by channel (portal versus fax), which shows whether the fax fallback is lagging.
+- Normal: 98% or higher within 1 hour.
+- Exception: below 95%, or any failed notification that stays unresolved for more than 4 hours.
+
+M7. Exceptions and integration health
+- Pain point addressed: supports visibility and reliability.
+- Definition: exceptions per 100 referrals by type (E1 to E7), the number of referrals in Integration Hold, and the dead-letter queue count.
+- Visualization: a weekly stacked column chart by exception type, plus a KPI card for Integration Hold.
+- Normal: an exception rate of 20% or less after stabilization, and zero referrals in Integration Hold.
+- Exception: any referral in Integration Hold for more than 30 minutes, or an exception rate above 25%.
+
+M8. AI-assist quality and equity
+- Supports: Section 6 oversight.
+- Definition: the percentage of AI-extracted fields that coordinators correct, the number of AI summaries flagged as inaccurate, and the correction and exception rates broken down by referral source and practice type.
+- Visualization: a line chart over time, which can show the model degrading, plus a bar chart by source, which can show that some sources are served worse than others.
+- Normal: a correction rate of 10% or less, and no gap of more than 5 points between sources.
+- Exception: a correction rate above 15% for 2 consecutive weeks, which triggers retraining. Any flagged summary or source gap goes to AI governance review.
+
+5.3 Page layout
+
+- Page 1, "Operations Now" (DirectQuery): M3, M4 (the at-risk list), M7 (Integration Hold) and today's M1.
+- Page 2, "Performance Trends" (hourly import, used for the steering committee): M1, M2, M5 and M6, each against the baseline.
+- Page 3, "Exceptions, AI and Equity": M7 and M8.
+
+
+SECTION 6: AI INTEGRATION AND RESPONSIBLE AI
+============================================
+
+6.1 Principles
+
+- AI assists people and never acts on its own. A named person is accountable for every output.
+- Deterministic, auditable rules make the triage-tier and routing decisions. AI does not.
+- AI runs only inside Contoso's BAA-covered Microsoft tenant. Privacy and Compliance must confirm that each AI feature is covered by the BAA and that Contoso's data is not used to train models. Any feature that is not covered is turned off in tenant settings.
+- The design follows Microsoft's Responsible AI principles: fairness, reliability and safety, privacy and security, inclusiveness, transparency and accountability.
+
+6.2 Use cases, risks, mitigations and oversight
+
+USE CASE 1: Intake extraction and coding suggestions (Stage 2)
+
+What AI does: AI Builder extracts the referral fields from faxes and emails. A prompt suggests a specialty and an ICD-10 code from the free-text reason for referral.
+
+Risks:
+- Accuracy: Handwriting or a poor-quality fax can be misread. A wrong DOB or name can lead to the wrong patient, and a wrong code can lead to a misroute.
+- Bias: Accuracy tends to be lower for handwritten or low-resolution faxes, which often come from small, rural or under-resourced practices. Uncommon or non-English names may be misread more often. Their patients could see more exceptions and longer delays.
+- Privacy: A fax often contains more PHI than the referral needs.
+- Transparency: Staff may not be able to tell which values AI filled in.
+- Oversight: Staff may approve high-confidence values without checking them (automation bias).
+
+Mitigations:
+- AI-filled fields are visibly marked until a coordinator confirms them.
+- The Business Process Flow gate requires confirmation of every field. Identity fields (name, DOB, MRN) always need explicit confirmation, whatever the confidence score.
+- Patient matching uses a deterministic Epic search, not AI.
+- Code suggestions display the source text they were drawn from.
+- Only the referral fields are kept in Dataverse.
+- Correction and delay rates are monitored by referral source (M8), and the model is retrained quarterly with diverse samples.
+- A lead spot-checks 5% of high-confidence records each month to catch rubber-stamping.
+
+Human oversight: The referral coordinator verifies the data and is accountable for its accuracy before anything is written to Epic.
+
+USE CASE 2: Clinical-note summary for urgency review (Stage 4)
+
+What AI does: For urgent and indeterminate referrals only, a prompt summarizes the attached referral documents against the approved rubric criteria. It cites the source document and page for each finding, and it states "not documented" when a criterion is absent. It does not recommend a tier.
+
+Risks:
+- Accuracy: The summary could include a finding that is not in the notes, or it could leave out a red flag. A missed red flag is the most serious risk, because under-triage delays care.
+- Bias: The summary may repeat stigmatizing language from the notes. It may give less weight to atypical presentations (for example, cardiac symptoms in women), to patient-reported symptoms, or to notes written in less standard language.
+- Privacy: A large language model service processes PHI.
+- Transparency: The reviewer must know that the content is AI-generated and which version produced it.
+- Oversight: Under time pressure, the reviewer may rely on the summary alone.
+
+Mitigations:
+- The summary is grounded only in this referral's documents, and it must quote its sources.
+- The prompt forbids diagnoses, urgency recommendations and dispositions.
+- The summary is labeled "AI-generated, not a clinical assessment; verify against source."
+- AI output can never lower a tier.
+- For every urgent referral, the reviewer must open the source notes in Epic and check an attestation box.
+- Before go-live, the summary is validated against a clinician-reviewed set of at least 200 synthetic or de-identified referrals. The acceptance criteria are that it captures 98% or more of documented red flags and makes up no findings.
+- The clinical reviewer lead audits 20 summaries a month.
+- A quarterly fairness review compares overrides and triage outcomes by age, sex, race and ethnicity, preferred language and payer.
+
+Human oversight: A licensed clinical reviewer makes and documents the urgency decision. The Medical Director owns the rubric and approves the prompt.
+
+USE CASE 3: Drafting referring-provider messages (Stage 7, E1 and E7)
+
+What AI does: Standard status notices use fixed templates with no AI. AI drafts only the non-standard messages: specific requests for missing information, and explanations of a redirect or decline, based on the reason the reviewer documented.
+
+Risks:
+- Accuracy: A draft could misstate the decision, include wrong patient details, or read as clinical advice.
+- Privacy: A message could include more PHI than needed or go to the wrong recipient.
+- Transparency: The provider may not know AI drafted the text.
+- Oversight: A draft could be sent without review.
+
+Mitigations:
+- Drafts are generated only from structured fields and the reviewer's documented reason.
+- The recipient always comes from the verified record, never from AI output.
+- A minimum-necessary template constrains what the message can contain.
+- There is no automatic send path for AI drafts.
+- The message carries a disclosure footer as Contoso policy requires.
+
+Human oversight: The coordinator reviews, edits and sends each message. Decline and redirect wording also needs the clinical reviewer's approval.
+
+USE CASE 4: Operational insights (Copilot in Power BI)
+
+What AI does: It writes narrative summaries of weekly performance, answers natural-language questions about the aggregated data, and drafts content for steering committee reports.
+
+Risks:
+- Accuracy: It could misinterpret a measure or misquote a figure.
+- Privacy: The data model might expose PHI.
+- Transparency: A narrative could be presented as verified fact.
+- Bias: It could encourage unfair comparisons between staff.
+
+Mitigations:
+- The Copilot-enabled data model holds only aggregated, de-identified data, with no names, MRNs, notes or staff-level measures.
+- Measures are certified and have documented definitions.
+- Narratives are labeled as AI-generated and checked against the KPI visuals.
+
+Human oversight: The department manager validates every figure before anything is distributed.
+
+6.3 Human oversight requirements, before any Copilot output is used
+
+1. Accountability: A named role is accountable for each output, as listed in 6.2 and recorded in the project RACI.
+2. Technical enforcement: Review is enforced by the system, not just by policy. Business Process Flow gates, AI-field flags, the absence of any auto-send path and reviewer attestation all make it impossible to skip.
+3. Training: Users complete training on AI limitations and automation bias before they are given access.
+4. Audit: Every AI output is logged with the model and prompt version, a timestamp, and the user who accepted, edited or rejected it, in the Dataverse AI Assist Log and in FHIR Provenance.
+5. Governance: A Clinical AI Governance group approves each use case and any change to a prompt or model, with re-validation. The group includes the Medical Director, the Privacy Officer, Compliance, IT Security and the Care Coordination manager.
+6. Monitoring:
+   - The M8 metrics, monthly audits and a quarterly fairness review track AI quality.
+   - Every AI output has a "flag as inaccurate" button.
+   - Safety events go through Contoso's patient-safety reporting system.
+7. Kill switch: Each AI feature can be turned off independently through an environment variable. The workflow then falls back to manual entry and review without stopping referral processing.
+8. Phased rollout: The pilot runs at one site and two specialties for 60 days. Use cases 1 and 3 go live first; use case 2 goes live only after it meets its validation criteria.
+
+6.4 Limitations: what Copilot must NEVER do
+
+- Assign, change or lower an urgency tier, or make any clinical judgment, including diagnosis, medical necessity, appropriateness, or accepting or declining a referral.
+- Route a referral or choose a specialist, site or queue.
+- Write directly to Epic or change the legal medical record.
+- Match patient identities or merge records.
+- Send any message to a provider, patient or external party without human approval.
+- Process PHI outside the BAA-covered Contoso tenant. This rules out consumer Copilot, public chatbots, personal accounts and web-grounded features. DLP policies block unapproved connectors, and staff are prohibited from pasting PHI into tools that are not approved.
+- Have Contoso's PHI used to train models.
+- Use demographics or other protected characteristics to prioritize patients.
+- Be presented as a clinician, or give clinical advice.
+- Operate in any way that a person cannot override.
+
+Inherent limitations staff must understand:
+- Copilot can be confidently wrong.
+- It knows only the documents it is given.
+- It cannot assess the patient.
+- Its output can vary from one run to the next.
+
+
+APPENDIX: INTERNAL CONSISTENCY CHECK
+====================================
+
+A. Systems are consistent across Sections 1 to 3
+
+- Epic: Stages 3 to 6 in Section 1; IP2 to IP5, IP8 and IP10 in Section 2; FHIR resources and the REF^I12 fallback in Section 3.
+- Scheduling platform: Stage 6 and condition C7; IP6 to IP8 and IP10; SRM^S01, SIU and FHIR Appointment.
+- Provider portal: Stages 1 and 7; IP2 and IP9; FHIR ServiceRequest, Task and Communication.
+- Fax server and mailbox: Stages 1 and 7 (fax fallback); IP1 and IP9; the 360X roadmap.
+
+B. Every Power Platform component appears in the automation design
+
+- Power Automate: all stages and exceptions E1 to E7.
+- AI Builder: Stage 2 and use cases 1 to 3.
+- Dataverse: all stages, the routing rules (C6) and the rubric (C5).
+- Power Apps: Stages 2 and 4 and the exception queues.
+- Power BI: Section 5 and use case 4.
+
+C. Each scenario pain point has a metric
+
+- 3.2-day processing time: M1.
+- 15% misrouting: M2.
+- No real-time visibility: M3 and M7.
+- No standardized triage: M4 and M5.
+- Inconsistent provider updates: M6.
+- AI oversight: M8.
+
+D. Each Copilot use case has a risk assessment, mitigations and a named overseer
+
+- Use case 1: the referral coordinator.
+- Use case 2: the clinical reviewer, with the Medical Director.
+- Use case 3: the coordinator, with the clinical reviewer for declines.
+- Use case 4: the department manager.
+
+E. Assumptions and dependencies to confirm before build
+
+- Whether Epic FHIR write for ServiceRequest is licensed; if not, the HL7 REF^I12 fallback is used.
+- That the scheduling platform supports HL7 v2 SRM/SIU messages.
+- That Privacy and Compliance confirm BAA coverage for each AI feature.
+- That the Medical Director approves the triage rubric before go-live.

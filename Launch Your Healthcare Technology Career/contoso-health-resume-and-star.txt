@@ -1,0 +1,34 @@
+TAILORED RESUME BULLETS
+(paste into the "Tailored Resume Bullets" box)
+
+• Verified cloud security configuration for a healthcare workload in Microsoft Defender for Cloud and the Microsoft Azure portal, reviewing 15+ security recommendations and fixing 5 high-priority gaps (unencrypted storage, open management ports, and missing multifactor authentication) to protect patient data.
+• Applied HIPAA Privacy and Security Rule requirements to protected health information (PHI) in a sandbox healthcare tenant, mapping access control, audit logging, and encryption safeguards to Microsoft Purview Compliance Manager controls and documenting evidence for each.
+• Reviewed 20+ user accounts, group memberships, and role-based permissions in Microsoft Entra ID during an identity and access management audit, finding 3 over-provisioned accounts and applying least-privilege changes so only assigned care-team roles could open patient records.
+• Diagnosed and resolved 12 user access and system access issues for simulated clinical staff using a structured diagnostic process (account status, Microsoft Entra sign-in logs, Conditional Access results, then group and role assignments), restoring access to scheduling and patient-record applications without granting extra permissions.
+
+
+STAR INTERVIEW RESPONSES
+(paste into the "STAR Interview Responses" box)
+
+Response 1 (Behavioral)
+Question: "Tell me about a time you performed an access review and found a discrepancy."
+
+Situation: In the identity and access management lab of my Microsoft Cloud for Healthcare program, I was given a sandbox tenant for a simulated outpatient clinic with more than 20 user accounts that could reach patient records.
+
+Task: My job was to review every user account, group membership, and role-based permission in Microsoft Entra ID and confirm that each person's access matched their job role under the HIPAA minimum-necessary standard.
+
+Action: I exported the user and group lists from Entra ID, compared each account against the clinic's role matrix, and found 3 over-provisioned accounts; the most serious was a front-desk scheduler still in a nursing group that gave read access to patient charts (PHI). I documented the finding, moved the scheduler into the correct scheduling-only group, and checked the Entra audit and sign-in logs to confirm no patient records had been opened through that access.
+
+Result: All 3 accounts were brought back to least privilege without breaking anyone's daily work, and I added a quarterly group-membership review to the lab's access checklist so role changes would not leave extra PHI access behind.
+
+
+Response 2 (Scenario-based)
+Question: "What would you do if a newly onboarded clinical coordinator cannot access the scheduling system on their first day?"
+
+Situation: I handled almost this exact ticket in my program's help-desk lab, where a newly created clinical coordinator account in a simulated clinic could not sign in to the scheduling application on day one.
+
+Task: I needed to restore access quickly so patient appointments were not delayed, while giving the coordinator only the permissions their role required.
+
+Action: I followed a structured diagnostic process: I confirmed the account was enabled and licensed in Microsoft Entra ID, then checked the Entra sign-in logs, which showed a Conditional Access block because multifactor authentication was not yet registered, and found the account was also missing from the scheduling app's security group. I walked the coordinator through MFA registration, added them to the scheduling-coordinator group rather than a broader clinical group, and watched the sign-in logs while they tried again.
+
+Result: The coordinator was scheduling patients within the same session with least-privilege access, and I documented both root causes in the ticket and recommended adding MFA registration and group assignment to the new-hire onboarding checklist so future clinical staff would not hit the same block.

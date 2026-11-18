@@ -1,0 +1,20 @@
+Target Role: Healthcare IT Support Specialist
+
+Skill Statements:
+
+1. Resolved 12 help-desk tickets in a simulated hospital environment, including patient-portal lockouts, Microsoft Teams virtual-visit audio/video failures, and Dataverse permission errors, across the Patient Access and Virtual Health solutions in Microsoft Cloud for Healthcare, restoring clinician and patient access within same-day resolution targets.
+
+2. Configured role-based access for 20+ physician, nurse, and front-desk user accounts using Microsoft Entra ID security groups and Conditional Access policies, restricting protected health information (PHI) to authorized care-team roles under the HIPAA minimum-necessary standard.
+
+3. Assessed 15+ HIPAA security and privacy controls in a sandbox healthcare tenant using Microsoft Purview Compliance Manager and Microsoft Defender for Cloud, documenting fixes for 5 high-priority gaps, including unencrypted patient-record storage and missing multifactor authentication.
+
+4. Documented a 10-step troubleshooting runbook and 3 quick-reference guides in SharePoint for Microsoft Teams virtual visits, giving nurses and front-desk staff a self-service fix for common telehealth connection issues before they escalate to IT.
+
+5. Built 3 Power Automate flows that routed appointment requests from the Patient Access portal to clinic scheduling queues in Dynamics 365 Customer Service, cutting manual intake from 6 steps to 2 for a simulated outpatient clinic.
+
+6. Mapped 15 patient and encounter data elements to HL7 FHIR resources in Azure Health Data Services and validated their sync into the Dataverse healthcare data model, so care coordinators using Care Management saw complete, accurate patient records.
+
+
+30-Second Elevator Pitch:
+
+"Hi, I'm [Your Name], a Healthcare IT Support Specialist with skills in managing clinical user access in Microsoft Entra ID, monitoring HIPAA compliance in Microsoft Purview, and troubleshooting Microsoft Teams virtual visits. I just completed the Microsoft Cloud for Healthcare program, where I resolved 12 help-desk tickets, from patient-portal lockouts to telehealth video failures, and set up role-based access for more than 20 clinical users. I'm looking for a support role on a hospital IT team where I can keep clinicians and patients connected while keeping patient data secure."

@@ -1,0 +1,92 @@
+CONTOSO COMMUNITY HEALTH
+Microsoft Cloud for Healthcare - Solution Design Document
+Candidate Name: [Your name]
+
+SECTION 1: Cloud Infrastructure and Security
+
+Azure services: Microsoft Dataverse stores the Section 3 Patient, Coverage, Referral and Appointment tables. Azure Health Data Services (FHIR service) receives scheduling, clinical and billing data. Azure Virtual Network private endpoints keep the FHIR service, Azure Key Vault and Blob Storage (scanned referrals) off the internet. Network security groups admit only the integration subnet, so a compromised clinic workstation cannot reach PHI, and a VPN Gateway links the clinics.
+
+Security controls: Microsoft Defender for Cloud runs Defender CSPM with the Storage, Key Vault and Resource Manager plans, scanning referral attachments for malware and tracking HITRUST/HIPAA compliance. Azure Policy denies publicly accessible storage and non-US regions. Entra ID sign-ins, Defender alerts, Dataverse activity from Microsoft Purview Audit and Section 4 validation failures feed Microsoft Sentinel, which flags bulk exports, cross-clinic access and abnormal integration volumes for Security Analysts. In a breach, Sentinel detects it, a playbook disables the account, and Purview Audit identifies affected patients for notification (Section 2).
+
+MFA: Conditional Access requires MFA for PHI access, and SMS is not allowed. Referral Coordinators, Front Desk Schedulers, Billing Specialists, Clinic Administrators, Operations Leadership and Compliance Auditors use Microsoft Authenticator with number matching. Clinicians tap FIDO2 keys at shared workstations, and Platform Administrators and Security Analysts use FIDO2 with Privileged Identity Management (PIM). External Specialists sign in as Entra B2B guests. New hires enroll with a manager-issued Temporary Access Pass.
+
+Encryption: Dataverse Transparent Data Encryption protects Patient, Coverage, Referral and Appointment rows, and the FHIR service encrypts clinical and scheduling resources; both use customer-managed Key Vault keys. Azure Storage Service Encryption protects scanned referrals. TLS 1.2+ protects app, portal and FHIR-to-Dataverse traffic, and IPsec protects the VPN.
+
+Cost: Sentinel ingestion, Dataverse capacity, FHIR API calls and Defender plans drive consumption costs. Basic-tier logs, file storage for attachments, targeted Defender plans and per-clinic Azure Cost Management budgets contain them without weakening security.
+
+SECTION 2: Compliance and Access Controls
+
+HIPAA alignment:
+Privacy Rule: Clinic-scoped Dataverse security roles and field-level security on clinical notes and Social Security numbers limit PHI to need-to-know.
+Security Rule: Administrative safeguards include Security and Privacy Officers, an annual risk analysis, training before access, quarterly access reviews and Microsoft's Business Associate Agreement (BAA). Physical safeguards include audited Microsoft datacenters and auto-locking Intune-managed devices; technical safeguards include unique user IDs, MFA, session timeouts, auditing and encryption.
+Breach Notification Rule: For PHI incidents, the Privacy Officer completes the four-factor risk assessment, identifies affected patients through Purview Audit, and notifies them within 60 days, with HHS notified (annually if under 500) and the media for over 500 residents of a state.
+
+Privacy controls: Referral Coordinators see only their clinic's Patient and Referral rows, clinical summaries are Clinician-only, and every view is logged. Only Clinic Administrators export, under the "Confidential - PHI" label that Endpoint DLP enforces. External Specialists see only their assigned referrals' reason, history and contacts in the Power Pages portal. Copilot inherits these limits.
+
+Access model (least privilege):
+Referral Coordinator (CCH-RefCoord-<Clinic>) creates and confirms own-clinic referrals, without export or clinical notes.
+Clinician (CCH-Clinicians-<Clinic>) submits referrals and reads clinical summaries.
+Front Desk Scheduler (CCH-FrontDesk-<Clinic>) updates appointments.
+Billing Specialist (CCH-Billing) completes authorization tasks.
+Clinic Administrator (CCH-ClinicAdmin-<Clinic>) triages exceptions, overrides routing and exports own-clinic data.
+Operations Leadership (CCH-Leadership) sees aggregate dashboards only.
+Compliance Auditor (CCH-Auditors) includes the Privacy Officer and reads audit logs.
+Security Analyst (CCH-SecurityAnalysts) holds Microsoft Sentinel Responder.
+Platform Administrator (CCH-PlatformAdmins) gets System Administrator only through PIM.
+External Specialist (CCH-ExternalSpecialists) sees assigned referrals in the portal.
+Referral Automation (an application user owned by Platform Administrators) updates only Referral routing fields.
+
+Directory: Each group maps to a Dataverse group team with its role and business unit. Staff groups use dynamic membership based on HR attributes. Auditor and specialist groups use expiring, approval-based Entitlement Management access packages; admin groups use PIM. Entra inbound provisioning creates accounts from HR, and Lifecycle Workflows issue Temporary Access Passes, assign HIPAA training and disable leavers.
+
+SECTION 3: Healthcare Data Model
+
+Data domains: Patient data identifies who is referred and who pays; referral data is the workflow record; scheduling data confirms appointments; operational timestamps drive escalations and dashboards.
+
+Patient mapping: MRN -> Patient (Contact).Medical Record Number; name, date of birth -> Full Name, Birth Date; preferred language -> Preferred Language; insurer, member ID -> Coverage.Payor, Subscriber ID; physician -> Primary Practitioner.
+Referral mapping: order ID -> Referral (ServiceRequest).Referral ID; specialty, urgency, clinic -> Specialty, Urgency, Owning Clinic; workflow state -> Status (Submitted, Incomplete, Assigned, Confirmed); timestamps -> Submitted On, Confirmed On; booking -> Appointment.Start.
+
+Data quality: A referral routes only when MRN, Coverage, Specialty, Urgency and the referring Clinician exist; otherwise Status becomes Incomplete. MRN format and ISO 8601 dates must match across systems. Coverage must be verified within 24 hours and appointments synced within five minutes.
+
+Lifecycle: PHI rows carry the "Confidential - PHI" Purview label, and dashboard aggregates carry "Internal." Purview retention keeps records ten years after the last encounter and audit logs six years.
+
+SECTION 4: Integration and Interoperability
+
+Source systems: The clinical records system (patients, referral orders) and the scheduling system (appointments) send in real time, since bookings confirm referrals. The billing system sends coverage nightly.
+
+Integration points: All three reach the FHIR service over the VPN. Dataverse healthcare APIs sync them into the Patient, Coverage, Referral and Appointment tables in near real time, and Referral status returns to the clinical records system as FHIR Task updates.
+
+Standard: FHIR R4 (Patient, Coverage, ServiceRequest, Appointment and Task) is the standard because both platforms are FHIR-native. Legacy HL7 v2 ADT A04/A08 and SIU S12 messages are converted with $convert-data.
+
+Validation: $validate sends resources with missing fields or malformed MRNs to a Platform Administrator error queue, and a nightly reconciliation compares source and Dataverse counts. Both stream to Sentinel, so rejection spikes or count gaps also alert Security Analysts. A failed coverage batch leaves affected referrals Incomplete.
+
+SECTION 5: Automation and Power Platform
+
+Tools: A model-driven Power Apps intake and review app replaces paper forms, Power Automate replaces shared-inbox routing, and Power BI replaces tracking spreadsheets.
+
+Trigger: A Clinician or Referral Coordinator saves a Referral row, or a ServiceRequest arrives from the clinical records system.
+Conditions: The flow checks completeness, then routes by Specialty, Owning Clinic, Urgency and payer authorization rules.
+Actions: The flow assigns the clinic's Referral Coordinator, who reviews the Copilot summary and confirms the specialist. It then creates a Billing Specialist task if authorization is required, publishes the referral to the portal, and sets Confirmed On when the Appointment syncs.
+Exceptions: Incomplete referrals return to the submitter, and unknown specialties go to Clinic Administrator triage. Referrals unconfirmed after 24 hours (urgent) or three business days (routine) escalate to the Clinic Administrator with a Copilot-drafted follow-up. Failed steps retry three times, then alert the Platform Administrator.
+
+Architecture: Power Apps writes to Dataverse under each user's Section 2 role, and Power Automate triggers on Dataverse row events as Referral Automation. Power BI reads Dataverse with row-level security.
+
+SECTION 6: Dashboard and Reporting
+
+Metrics and visuals:
+Days to confirmation (Confirmed On minus Submitted On) uses a weekly line chart flagged above five days, because delays break continuity of care.
+Referrals pending (Status not Confirmed) uses a card with a Power BI data alert above 40 per clinic, showing daily workload.
+Overdue referrals by clinic (Owning Clinic, Urgency, Submitted On) uses a bar chart highlighting urgent referrals older than 24 hours, the Section 5 escalation point.
+Incomplete rate (Status = Incomplete) uses a KPI visual flagged above 10%, signaling intake training needs.
+
+Stakeholders: Clinic Administrators use the overdue chart each morning to reassign referrals. Operations Leadership uses the aggregate trend to decide on adding coordinators or specialist partners.
+
+SECTION 7: AI Integration and Responsible AI
+
+Use cases: Copilot supports three Section 5 steps. At coordinator review, Copilot in the Power Apps app summarizes prior referrals and coverage; at escalation, it drafts the specialist follow-up; at triage, Copilot in Power BI lists overdue referrals for Clinic Administrators. If Copilot fails, staff work from the Referral row.
+
+Accuracy: A wrong summary could misdirect a patient's care, so coordinators verify it against the Referral row, and routing uses only structured fields.
+Privacy: Copilot reads PHI only under the user's Section 2 role and field-level security, which enforces the minimum necessary standard. Purview Audit logs its use, and only BAA-covered features are enabled.
+Bias: Sparse or non-English records could produce weaker summaries and slower care, so Compliance Auditors review quarterly samples by Preferred Language.
+Transparency: Staff might treat a draft as verified, so drafts are labeled "AI-generated, review required."
+
+Human oversight: Referral Coordinators approve every summary and message, and Billing Specialists review payer submissions, so no Copilot output reaches a patient, payer or routing decision unreviewed.
